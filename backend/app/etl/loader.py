@@ -30,7 +30,7 @@ def _safe_value(val: Any) -> Any:
         if hasattr(val, "item"):
             return val.item()
     except Exception:
-        pass
+        logger.debug("Could not convert value via .item(), returning as-is: %r", val, exc_info=True)
     # Timestamps → ISO string
     if isinstance(val, pd.Timestamp):
         return val.isoformat()

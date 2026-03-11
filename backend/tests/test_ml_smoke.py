@@ -26,6 +26,6 @@ async def test_train_link_predictor(networkx_graph):
 
 @pytest.mark.slow
 async def test_full_pipeline(neo4j_client):
-    result = await run_training_pipeline(neo4j_client, skip_pinecone=True)
+    result = await run_training_pipeline(neo4j_client)
     assert "embeddings" in result
     assert "link_prediction" in result

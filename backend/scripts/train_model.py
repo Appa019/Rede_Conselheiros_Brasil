@@ -1,11 +1,12 @@
 """CLI script to run ML training pipeline."""
 
-import argparse
 import asyncio
 import logging
 import sys
 
 sys.path.insert(0, ".")
+
+import argparse
 
 from app.graph.neo4j_client import Neo4jClient
 from app.ml.train import run_training_pipeline
@@ -13,7 +14,6 @@ from app.ml.train import run_training_pipeline
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Train ML models")
-    parser.add_argument("--skip-pinecone", action="store_true", help="Skip Pinecone upload")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -23,9 +23,7 @@ async def main() -> None:
     )
 
     async with Neo4jClient() as client:
-        results = await run_training_pipeline(
-            client, skip_pinecone=args.skip_pinecone
-        )
+        results = await run_training_pipeline(client)
 
     print("\nTraining Results:")
     for key, value in results.items():

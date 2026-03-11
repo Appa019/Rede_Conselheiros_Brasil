@@ -12,7 +12,7 @@ from app.graph.neo4j_client import Neo4jClient
 from app.graph.metrics import compute_and_save_metrics, invalidate_graph_cache
 from app.etl.orchestrator import run_etl
 from app.ml.train import run_training_pipeline
-from app.schemas.common import JobStatus
+from app.schemas.admin import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ async def _run_train_job(job_id: str) -> None:
             _update_job(job_id, progress=pct, message=msg)
 
         async with Neo4jClient() as client:
-            result = await run_training_pipeline(client, skip_pinecone=True, on_progress=on_progress)
+            result = await run_training_pipeline(client, on_progress=on_progress)
 
         _finish_job(job_id, "completed", result=result, message="Treinamento concluido com sucesso")
     except Exception as exc:

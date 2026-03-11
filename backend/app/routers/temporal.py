@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from app.dependencies import get_neo4j
 from app.graph.neo4j_client import Neo4jClient
 from app.graph import queries
-from app.schemas.common import TemporalDataPoint
+from app.schemas.metrics import TemporalDataPoint
 
 router = APIRouter(prefix="/api/temporal", tags=["temporal"])
 

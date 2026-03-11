@@ -153,7 +153,7 @@ export default function PredictionsPage() {
 
           {similarError && (
             <div className="bg-[var(--color-danger)]/10 border border-[var(--color-danger)]/20 p-4 text-sm text-[var(--color-danger)] mb-4">
-              Erro ao buscar membros similares. Verifique se o modelo foi treinado e o ID e valido.
+              Erro ao buscar membros similares. Verifique se o modelo foi treinado e o ID é válido.
             </div>
           )}
 

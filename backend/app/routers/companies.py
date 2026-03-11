@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from app.dependencies import get_neo4j
 from app.graph.neo4j_client import Neo4jClient
 from app.graph import queries
-from app.schemas.common import (
+from app.schemas.members import (
     BoardMember,
     BoardResponse,
     CompanyDetail,

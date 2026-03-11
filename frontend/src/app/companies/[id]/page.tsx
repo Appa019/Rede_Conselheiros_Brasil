@@ -65,7 +65,7 @@ function CompanyProfileContent({ cdCvm }: { cdCvm: string }) {
             <div className="p-5 border-b border-[var(--color-border)]">
               <h3 className="text-sm font-medium text-[var(--color-text-2)] flex items-center gap-2">
                 <Building2 className="h-4 w-4" />
-                Composicao do Conselho
+                Composição do Conselho
               </h3>
             </div>
             <div className="divide-y divide-[var(--color-border)]">

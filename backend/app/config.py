@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -6,9 +7,7 @@ class Settings(BaseSettings):
 
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "conselheiros2024"
-    pinecone_api_key: str = ""
-    pinecone_index_name: str = "conselheiros-embeddings"
+    neo4j_password: str = Field(default="", description="Neo4j password — set via NEO4J_PASSWORD env var")
     cors_origins: list[str] = ["http://localhost:3000"]
     cvm_base_url: str = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS"
     data_dir: str = "data"

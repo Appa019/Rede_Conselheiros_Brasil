@@ -79,19 +79,19 @@ function MemberProfileContent({ id }: { id: string }) {
                   <MetricCard
                     title="PageRank"
                     value={member?.page_rank?.toFixed(4) ?? "-"}
-                    tooltip="Importancia relativa na rede. Valores altos = conexao com membros influentes."
+                    tooltip="Importância relativa na rede. Valores altos = conexão com membros influentes."
                     icon={TrendingUp}
                   />
                   <MetricCard
                     title="Betweenness"
                     value={member?.betweenness?.toFixed(4) ?? "-"}
-                    tooltip="Frequencia nos caminhos mais curtos. Alto = ponte entre grupos."
+                    tooltip="Frequência nos caminhos mais curtos. Alto = ponte entre grupos."
                     icon={GitFork}
                   />
                   <MetricCard
                     title="Degree Centrality"
                     value={member?.degree_centrality?.toFixed(4) ?? "-"}
-                    tooltip="Proporcao de membros conectados diretamente."
+                    tooltip="Proporção de membros conectados diretamente."
                     icon={Circle}
                   />
                   <MetricCard

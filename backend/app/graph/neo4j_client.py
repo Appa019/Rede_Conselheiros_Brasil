@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 
 from neo4j import AsyncGraphDatabase, AsyncDriver
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Neo4jClient:
@@ -61,4 +64,5 @@ class Neo4jClient:
             await self.execute_read("RETURN 1 AS ok")
             return True
         except Exception:
+            logger.warning("Neo4j health check failed", exc_info=True)
             return False

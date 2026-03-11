@@ -3,7 +3,6 @@
 import pytest
 
 from app.graph.metrics import (
-    build_networkx_graph,
     compute_advanced_metrics,
     compute_and_save_metrics,
     compute_centrality_metrics,

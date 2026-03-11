@@ -7,7 +7,7 @@ import pytest
 
 from app.etl.downloader import download_cadastro, download_fre_data
 from app.etl.extractor import parse_administradores, parse_cadastro
-from app.etl.cleaner import clean_administradores, clean_cadastro
+from app.etl.cleaner import clean_administradores
 
 
 pytestmark = pytest.mark.smoke

@@ -1,4 +1,5 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export async function apiFetch<T>(
   endpoint: string,
@@ -6,6 +7,7 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const url = `${API_URL}${endpoint}`;
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,

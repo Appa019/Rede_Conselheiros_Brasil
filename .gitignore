@@ -23,8 +23,11 @@ out/
 .env.local
 .env.*.local
 
-# Data
-backend/data/
+# Data (raw downloads — large files not tracked)
+backend/data/*
+!backend/data/models/
+backend/data/models/*.pkl
+backend/data/models/*.joblib
 *.zip
 *.csv
 

@@ -225,94 +225,72 @@ def _compute_random_graph_cl(n: int, m: int, seed: int) -> tuple[float, float]:
     return c, l_val
 
 
-def compute_advanced_metrics(G: nx.Graph) -> dict[str, Any]:
-    """Compute advanced structural metrics: assortativity, transitivity, small-world, etc."""
-    logger.info("Computing advanced metrics...")
+def _compute_small_world_sigma(
+    H: nx.Graph, c_real: float, l_real: float, n_random: int = 5
+) -> dict[str, Any]:
+    """Compute small-world sigma via ensemble of random graph comparisons.
+
+    Args:
+        H: Largest connected component subgraph.
+        c_real: Real transitivity of H.
+        l_real: Real average shortest path length of H.
+        n_random: Number of random reference graphs to generate.
+
+    Returns:
+        Dict with small_world_sigma, CI bounds, and is_small_world flag.
+    """
+    n = H.number_of_nodes()
+    m = H.number_of_edges()
+    _null: dict[str, Any] = {
+        "small_world_sigma": None,
+        "small_world_sigma_ci_low": None,
+        "small_world_sigma_ci_high": None,
+        "is_small_world": False,
+    }
+
+    try:
+        with ThreadPoolExecutor(max_workers=n_random) as executor:
+            futures = [
+                executor.submit(_compute_random_graph_cl, n, m, seed=42 + i)
+                for i in range(n_random)
+            ]
+            random_results = [f.result() for f in futures]
+
+        c_randoms = [r[0] for r in random_results]
+        l_randoms = [r[1] for r in random_results if r[1] != float("inf")]
+
+        c_random = np.mean(c_randoms) if c_randoms else 0
+        l_random = np.mean(l_randoms) if l_randoms else float("inf")
+
+        if c_random <= 0 or l_random <= 0 or l_real <= 0 or l_random == float("inf"):
+            return _null
+
+        sigmas = [
+            (c_real / c_r) / (l_real / l_r)
+            for c_r, l_r in random_results
+            if c_r > 0 and l_r > 0 and l_r != float("inf")
+        ]
+        sigma = (c_real / c_random) / (l_real / l_random)
+
+        return {
+            "small_world_sigma": round(sigma, 4),
+            "is_small_world": sigma > 1,
+            "small_world_sigma_ci_low": round(float(np.percentile(sigmas, 2.5)), 4) if len(sigmas) >= 3 else None,
+            "small_world_sigma_ci_high": round(float(np.percentile(sigmas, 97.5)), 4) if len(sigmas) >= 3 else None,
+        }
+    except Exception as exc:
+        logger.warning("Small-world computation failed: %s", exc)
+        return _null
+
+
+def _compute_rich_club(G: nx.Graph) -> dict[str, Any]:
+    """Compute rich-club coefficients (raw and normalized) for top 5% of degrees.
+
+    Returns:
+        Dict with rich_club_top and rich_club_normalized.
+    """
     result: dict[str, Any] = {}
 
-    # Assortativity
-    try:
-        result["assortativity"] = round(nx.degree_assortativity_coefficient(G), 4)
-    except Exception:
-        result["assortativity"] = 0.0
-
-    # Transitivity (global clustering)
-    result["transitivity"] = round(nx.transitivity(G), 4)
-
-    # Largest connected component for path-based metrics
-    if G.number_of_nodes() > 0:
-        largest_cc = max(nx.connected_components(G), key=len)
-        H = G.subgraph(largest_cc).copy()
-
-        if H.number_of_nodes() > 1:
-            result["avg_shortest_path"] = round(nx.average_shortest_path_length(H), 4)
-            result["diameter"] = nx.diameter(H)
-
-            # Small-world sigma via ensemble of 5 random graphs
-            n = H.number_of_nodes()
-            m = H.number_of_edges()
-            c_real = nx.transitivity(H)
-            l_real = result["avg_shortest_path"]
-
-            try:
-                n_random = 5
-                with ThreadPoolExecutor(max_workers=n_random) as executor:
-                    futures = [
-                        executor.submit(_compute_random_graph_cl, n, m, seed=42 + i)
-                        for i in range(n_random)
-                    ]
-                    random_results = [f.result() for f in futures]
-
-                c_randoms = [r[0] for r in random_results]
-                l_randoms = [r[1] for r in random_results if r[1] != float("inf")]
-
-                c_random = np.mean(c_randoms) if c_randoms else 0
-                l_random = np.mean(l_randoms) if l_randoms else float("inf")
-
-                if c_random > 0 and l_random > 0 and l_real > 0 and l_random != float("inf"):
-                    sigmas = []
-                    for c_r, l_r in random_results:
-                        if c_r > 0 and l_r > 0 and l_r != float("inf"):
-                            s = (c_real / c_r) / (l_real / l_r)
-                            sigmas.append(s)
-
-                    sigma = (c_real / c_random) / (l_real / l_random)
-                    result["small_world_sigma"] = round(sigma, 4)
-                    result["is_small_world"] = sigma > 1
-
-                    if len(sigmas) >= 3:
-                        result["small_world_sigma_ci_low"] = round(float(np.percentile(sigmas, 2.5)), 4)
-                        result["small_world_sigma_ci_high"] = round(float(np.percentile(sigmas, 97.5)), 4)
-                    else:
-                        result["small_world_sigma_ci_low"] = None
-                        result["small_world_sigma_ci_high"] = None
-                else:
-                    result["small_world_sigma"] = None
-                    result["small_world_sigma_ci_low"] = None
-                    result["small_world_sigma_ci_high"] = None
-                    result["is_small_world"] = False
-            except Exception as exc:
-                logger.warning("Small-world computation failed: %s", exc)
-                result["small_world_sigma"] = None
-                result["small_world_sigma_ci_low"] = None
-                result["small_world_sigma_ci_high"] = None
-                result["is_small_world"] = False
-        else:
-            result["avg_shortest_path"] = None
-            result["diameter"] = None
-            result["small_world_sigma"] = None
-            result["small_world_sigma_ci_low"] = None
-            result["small_world_sigma_ci_high"] = None
-            result["is_small_world"] = False
-    else:
-        result["avg_shortest_path"] = None
-        result["diameter"] = None
-        result["small_world_sigma"] = None
-        result["small_world_sigma_ci_low"] = None
-        result["small_world_sigma_ci_high"] = None
-        result["is_small_world"] = False
-
-    # Rich-club coefficient — top 5% of degree values (min 5, max 20 keys)
     try:
         rc = nx.rich_club_coefficient(G, normalized=False)
         sorted_keys = sorted(rc.keys())
@@ -320,9 +298,9 @@ def compute_advanced_metrics(G: nx.Graph) -> dict[str, Any]:
         top_keys = sorted_keys[-n_keys:] if len(sorted_keys) > n_keys else sorted_keys
         result["rich_club_top"] = {k: round(rc[k], 4) for k in top_keys}
     except Exception:
+        logger.warning("Rich-club (unnormalized) computation failed, using empty dict", exc_info=True)
         result["rich_club_top"] = {}
 
-    # Rich-club normalized (compare to random graph baseline)
     try:
         rc_norm = nx.rich_club_coefficient(G, normalized=True)
         sorted_keys = sorted(rc_norm.keys())
@@ -333,6 +311,49 @@ def compute_advanced_metrics(G: nx.Graph) -> dict[str, Any]:
         logger.warning("Normalized rich-club computation failed, using empty dict")
         result["rich_club_normalized"] = {}
 
+    return result
+
+
+def compute_advanced_metrics(G: nx.Graph) -> dict[str, Any]:
+    """Compute advanced structural metrics: assortativity, transitivity, small-world, etc."""
+    logger.info("Computing advanced metrics...")
+    result: dict[str, Any] = {}
+
+    # Assortativity
+    try:
+        result["assortativity"] = round(nx.degree_assortativity_coefficient(G), 4)
+    except Exception:
+        logger.warning("Assortativity computation failed, defaulting to 0.0", exc_info=True)
+        result["assortativity"] = 0.0
+
+    # Transitivity (global clustering)
+    result["transitivity"] = round(nx.transitivity(G), 4)
+
+    # Path-based metrics on the largest connected component
+    _path_null = {
+        "avg_shortest_path": None,
+        "diameter": None,
+        "small_world_sigma": None,
+        "small_world_sigma_ci_low": None,
+        "small_world_sigma_ci_high": None,
+        "is_small_world": False,
+    }
+
+    if G.number_of_nodes() > 0:
+        largest_cc = max(nx.connected_components(G), key=len)
+        H = G.subgraph(largest_cc).copy()
+
+        if H.number_of_nodes() > 1:
+            avg_path = round(nx.average_shortest_path_length(H), 4)
+            result["avg_shortest_path"] = avg_path
+            result["diameter"] = nx.diameter(H)
+            result.update(_compute_small_world_sigma(H, nx.transitivity(H), avg_path))
+        else:
+            result.update(_path_null)
+    else:
+        result.update(_path_null)
+
+    result.update(_compute_rich_club(G))
     return result
 
 
@@ -349,6 +370,80 @@ def _fit_power_law(arr: np.ndarray, xmin: int) -> tuple[float, float]:
     fitted_cdf = 1 - (xmin / sorted_tail) ** (alpha - 1)
     ks_d = float(np.max(np.abs(empirical_cdf - fitted_cdf)))
     return float(alpha), ks_d
+
+
+def _bootstrap_power_law_ci(
+    tail: np.ndarray, xmin: int, n_bootstrap: int = 50
+) -> tuple[float | None, float | None]:
+    """Bootstrap confidence interval for the power-law alpha exponent.
+
+    Args:
+        tail: Degree values in the tail (>= xmin).
+        xmin: Lower bound for the power-law fit.
+        n_bootstrap: Number of bootstrap resamples.
+
+    Returns:
+        (ci_low, ci_high) at 95% level, or (None, None) if insufficient data.
+    """
+    rng = np.random.default_rng(42)
+    boot_alphas = []
+    for _ in range(n_bootstrap):
+        boot_sample = rng.choice(tail, size=len(tail), replace=True)
+        boot_alpha = 1 + len(boot_sample) / np.sum(np.log(boot_sample / (xmin - 0.5)))
+        if np.isfinite(boot_alpha):
+            boot_alphas.append(boot_alpha)
+
+    if len(boot_alphas) >= 10:
+        return (
+            round(float(np.percentile(boot_alphas, 2.5)), 4),
+            round(float(np.percentile(boot_alphas, 97.5)), 4),
+        )
+    return None, None
+
+
+def _compute_lognormal_vs_pl(
+    tail: np.ndarray, alpha: float, xmin: int
+) -> tuple[float | None, float | None]:
+    """Log-likelihood ratio test (Vuong) comparing log-normal vs power-law fit.
+
+    Args:
+        tail: Degree values in the tail (>= xmin).
+        alpha: Fitted power-law exponent.
+        xmin: Lower bound used for the power-law fit.
+
+    Returns:
+        (ratio, vuong_p_value), or (None, None) on failure.
+    """
+    try:
+        log_tail = np.log(tail)
+        mu_ln = float(np.mean(log_tail))
+        sigma_ln = float(np.std(log_tail))
+
+        if sigma_ln <= 0:
+            return None, None
+
+        ll_pl = (
+            len(tail) * np.log(alpha - 1)
+            - len(tail) * np.log(xmin)
+            - alpha * np.sum(np.log(tail / xmin))
+        )
+        ll_ln = float(np.sum(stats.lognorm.logpdf(tail, s=sigma_ln, scale=np.exp(mu_ln))))
+
+        ratio = float(ll_pl - ll_ln)
+        n_tail = len(tail)
+        std_ratio = float(np.std([
+            np.log((alpha - 1) / xmin) - alpha * np.log(d / xmin)
+            - stats.lognorm.logpdf(d, s=sigma_ln, scale=np.exp(mu_ln))
+            for d in tail
+        ]))
+        vuong_p = (
+            2 * (1 - stats.norm.cdf(abs(ratio) / (std_ratio * np.sqrt(n_tail))))
+            if std_ratio > 0
+            else 1.0
+        )
+        return round(ratio, 4), round(float(vuong_p), 4)
+    except Exception:
+        return None, None
 
 
 def compute_degree_distribution(G: nx.Graph) -> dict[str, Any]:
@@ -380,22 +475,16 @@ def compute_degree_distribution(G: nx.Graph) -> dict[str, Any]:
             raise ValueError("Too few unique degree values")
 
         # Find xmin that minimizes KS distance
-        best_xmin = unique_degrees[0]
-        best_ks = float("inf")
-        best_alpha = float("inf")
-
+        best_xmin, best_ks, best_alpha = unique_degrees[0], float("inf"), float("inf")
         for xm in unique_degrees:
             alpha, ks_d = _fit_power_law(arr, xm)
             if ks_d < best_ks:
-                best_ks = ks_d
-                best_xmin = xm
-                best_alpha = alpha
+                best_ks, best_xmin, best_alpha = ks_d, xm, alpha
 
         tail = arr[arr >= best_xmin]
         if len(tail) < 10 or best_alpha == float("inf"):
             raise ValueError("Insufficient tail data for power-law fit")
 
-        # KS test p-value
         p_value = float(stats.kstest(
             tail,
             lambda x: 1 - (best_xmin / x) ** (best_alpha - 1),
@@ -406,63 +495,22 @@ def compute_degree_distribution(G: nx.Graph) -> dict[str, Any]:
         result["power_law_p_value"] = round(p_value, 4)
         result["is_power_law"] = p_value > 0.05
 
-        # Bootstrap CI for alpha (50 iterations)
-        rng = np.random.default_rng(42)
-        boot_alphas = []
-        for _ in range(50):
-            boot_sample = rng.choice(tail, size=len(tail), replace=True)
-            boot_alpha = 1 + len(boot_sample) / np.sum(np.log(boot_sample / (best_xmin - 0.5)))
-            if np.isfinite(boot_alpha):
-                boot_alphas.append(boot_alpha)
+        ci_low, ci_high = _bootstrap_power_law_ci(tail, best_xmin)
+        result["power_law_alpha_ci_low"] = ci_low
+        result["power_law_alpha_ci_high"] = ci_high
 
-        if len(boot_alphas) >= 10:
-            result["power_law_alpha_ci_low"] = round(float(np.percentile(boot_alphas, 2.5)), 4)
-            result["power_law_alpha_ci_high"] = round(float(np.percentile(boot_alphas, 97.5)), 4)
-        else:
-            result["power_law_alpha_ci_low"] = None
-            result["power_law_alpha_ci_high"] = None
-
-        # Log-normal vs power-law comparison (log-likelihood ratio)
-        try:
-            log_tail = np.log(tail)
-            mu_ln = float(np.mean(log_tail))
-            sigma_ln = float(np.std(log_tail))
-
-            if sigma_ln > 0:
-                # Log-likelihood of power-law
-                ll_pl = len(tail) * np.log(best_alpha - 1) - len(tail) * np.log(best_xmin) - best_alpha * np.sum(np.log(tail / best_xmin))
-                # Log-likelihood of log-normal
-                ll_ln = float(np.sum(stats.lognorm.logpdf(tail, s=sigma_ln, scale=np.exp(mu_ln))))
-
-                ratio = float(ll_pl - ll_ln)
-                # Vuong test: ratio / (std * sqrt(n))
-                n_tail = len(tail)
-                std_ratio = float(np.std([
-                    np.log((best_alpha - 1) / best_xmin) - best_alpha * np.log(d / best_xmin)
-                    - stats.lognorm.logpdf(d, s=sigma_ln, scale=np.exp(mu_ln))
-                    for d in tail
-                ]))
-                vuong_p = 2 * (1 - stats.norm.cdf(abs(ratio) / (std_ratio * np.sqrt(n_tail)))) if std_ratio > 0 else 1.0
-
-                result["logn_vs_pl_ratio"] = round(ratio, 4)
-                result["logn_vs_pl_p_value"] = round(float(vuong_p), 4)
-            else:
-                result["logn_vs_pl_ratio"] = None
-                result["logn_vs_pl_p_value"] = None
-        except Exception:
-            result["logn_vs_pl_ratio"] = None
-            result["logn_vs_pl_p_value"] = None
+        ratio, vuong_p = _compute_lognormal_vs_pl(tail, best_alpha, best_xmin)
+        result["logn_vs_pl_ratio"] = ratio
+        result["logn_vs_pl_p_value"] = vuong_p
 
     except Exception as exc:
         logger.warning("Power-law fit failed: %s", exc)
-        result["power_law_alpha"] = None
-        result["power_law_alpha_ci_low"] = None
-        result["power_law_alpha_ci_high"] = None
-        result["power_law_xmin"] = None
-        result["power_law_p_value"] = None
-        result["is_power_law"] = False
-        result["logn_vs_pl_ratio"] = None
-        result["logn_vs_pl_p_value"] = None
+        result.update({
+            "power_law_alpha": None, "power_law_alpha_ci_low": None,
+            "power_law_alpha_ci_high": None, "power_law_xmin": None,
+            "power_law_p_value": None, "is_power_law": False,
+            "logn_vs_pl_ratio": None, "logn_vs_pl_p_value": None,
+        })
 
     return result
 

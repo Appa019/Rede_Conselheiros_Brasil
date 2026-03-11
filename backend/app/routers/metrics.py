@@ -1,8 +1,9 @@
 """Network metrics and concentration endpoints."""
 
+import logging
+
 import networkx as nx
 from fastapi import APIRouter, Depends
-
 from app.dependencies import get_neo4j
 from app.graph.neo4j_client import Neo4jClient
 from app.graph import queries
@@ -15,7 +16,7 @@ from app.graph.metrics import (
     compute_sector_interlocking,
     get_cached_graph,
 )
-from app.schemas.common import (
+from app.schemas.metrics import (
     AdvancedMetrics,
     CentralityCorrelation,
     ConcentrationMetrics,
@@ -24,6 +25,8 @@ from app.schemas.common import (
     ResilienceAnalysis,
     SectorInterlocking,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
@@ -97,7 +100,7 @@ async def get_concentration_metrics(
                 shares_m = [b / total_boards for b in board_counts]
                 hhi_memberships = round(sum(s**2 for s in shares_m), 6)
     except Exception:
-        pass
+        logger.warning("HHI memberships query failed, skipping", exc_info=True)
 
     return ConcentrationMetrics(
         gini_centrality=round(gini, 4),
