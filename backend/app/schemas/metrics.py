@@ -20,7 +20,8 @@ class ConcentrationMetrics(BaseModel):
     gini_centrality: float = 0.0
     hhi_seats: float = 0.0
     hhi_memberships: float | None = None
-    interlocking_index: float = 0.0
+    # Real interlocking index (Mizruchi 1996): fraction of company pairs sharing ≥1 member
+    interlocking_index: float | None = None
     network_density: float = 0.0
 
 

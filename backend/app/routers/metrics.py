@@ -1,5 +1,6 @@
 """Network metrics and concentration endpoints."""
 
+import asyncio
 import logging
 
 import networkx as nx
@@ -10,10 +11,10 @@ from app.graph import queries
 from app.graph.metrics import (
     compute_advanced_metrics,
     compute_centrality_correlations,
-    compute_centrality_metrics,
     compute_degree_distribution,
     compute_resilience,
     compute_sector_interlocking,
+    get_cached_centrality_metrics,
     get_cached_graph,
 )
 from app.schemas.metrics import (
@@ -56,57 +57,61 @@ async def get_metrics_overview(
 async def get_concentration_metrics(
     client: Neo4jClient = Depends(get_neo4j),
 ) -> ConcentrationMetrics:
-    """Return Gini, HHI, interlocking index, and network density."""
-    records = await client.execute_read(queries.GET_CONCENTRATION_METRICS)
+    """Return Gini, HHI, interlocking index (Mizruchi 1996), and network density."""
 
-    if not records or not records[0].get("centralities"):
-        return ConcentrationMetrics()
+    # Gini and HHI from raw board counts (seats per person) — same basis for both
+    board_records = await client.execute_read(
+        "MATCH (p:Person)-[:MEMBER_OF]->(c:Company) "
+        "WITH p, count(DISTINCT c) AS boards "
+        "RETURN collect(boards) AS board_counts"
+    )
+    board_counts: list[int] = (
+        board_records[0]["board_counts"]
+        if board_records and board_records[0].get("board_counts")
+        else []
+    )
+    board_counts_sorted = sorted(board_counts)
+    n = len(board_counts_sorted)
+    total_boards = sum(board_counts_sorted)
 
-    centralities = sorted(records[0]["centralities"])
-    n = len(centralities)
-
-    # Gini coefficient
-    if n > 0 and sum(centralities) > 0:
-        numerator = 2 * sum(i * d for i, d in enumerate(centralities, 1))
-        denominator = n * sum(centralities)
-        gini = (numerator / denominator - (n + 1) / n)
-    else:
-        gini = 0.0
-
-    # HHI approximation from degree centrality distribution
-    total = sum(centralities)
-    if total > 0:
-        shares = [c / total for c in centralities]
+    if n > 0 and total_boards > 0:
+        numerator = 2 * sum(i * d for i, d in enumerate(board_counts_sorted, 1))
+        gini = numerator / (n * total_boards) - (n + 1) / n
+        shares = [b / total_boards for b in board_counts_sorted]
         hhi = sum(s**2 for s in shares)
     else:
+        gini = 0.0
         hhi = 0.0
 
-    # Real density and interlocking from the actual graph
+    # Network density from the person-person CO_MEMBER graph
     G = await get_cached_graph(client)
     density = nx.density(G) if G.number_of_nodes() > 1 else 0.0
 
-    # HHI of memberships: count boards per person from Neo4j
-    hhi_memberships = None
+    # Real interlocking index (Mizruchi 1996): fraction of company pairs sharing ≥1 member
+    # = interlocked_pairs / (N*(N-1)/2)  where N = number of companies
+    interlocking_index = 0.0
     try:
-        membership_records = await client.execute_read(
-            "MATCH (p:Person)-[:MEMBER_OF]->(c:Company) "
-            "WITH p, count(DISTINCT c) AS boards "
-            "RETURN collect(boards) AS board_counts"
-        )
-        if membership_records and membership_records[0].get("board_counts"):
-            board_counts = membership_records[0]["board_counts"]
-            total_boards = sum(board_counts)
-            if total_boards > 0:
-                shares_m = [b / total_boards for b in board_counts]
-                hhi_memberships = round(sum(s**2 for s in shares_m), 6)
+        il_records = await client.execute_read("""
+            MATCH (c:Company)
+            WITH count(c) AS n_companies
+            MATCH (c1:Company)<-[:MEMBER_OF]-(p:Person)-[:MEMBER_OF]->(c2:Company)
+            WHERE id(c1) < id(c2)
+            WITH n_companies, count(DISTINCT [c1.cd_cvm, c2.cd_cvm]) AS interlocked_pairs
+            RETURN interlocked_pairs, n_companies,
+                   CASE WHEN n_companies > 1
+                        THEN toFloat(interlocked_pairs) / (toFloat(n_companies) * (n_companies - 1) / 2)
+                        ELSE 0.0 END AS interlocking_index
+        """)
+        if il_records:
+            interlocking_index = float(il_records[0].get("interlocking_index") or 0.0)
     except Exception:
-        logger.warning("HHI memberships query failed, skipping", exc_info=True)
+        logger.warning("Interlocking index query failed, defaulting to 0.0", exc_info=True)
 
     return ConcentrationMetrics(
         gini_centrality=round(gini, 4),
         hhi_seats=round(hhi, 6),
-        hhi_memberships=hhi_memberships,
-        interlocking_index=round(density, 4),
+        hhi_memberships=round(hhi, 6),  # same as hhi_seats (both from raw board counts)
+        interlocking_index=round(interlocking_index, 4),
         network_density=round(density, 4),
     )
 
@@ -117,7 +122,9 @@ async def get_advanced_metrics(
 ) -> AdvancedMetrics:
     """Return advanced structural metrics: assortativity, transitivity, small-world, etc."""
     G = await get_cached_graph(client)
-    data = compute_advanced_metrics(G)
+    # Offload to thread — avg_shortest_path + small_world_sigma (50 random graphs)
+    # are CPU-bound and would block the event loop for 30-120s otherwise
+    data = await asyncio.to_thread(compute_advanced_metrics, G)
     return AdvancedMetrics(**data)
 
 
@@ -146,7 +153,8 @@ async def get_centrality_correlation(
 ) -> list[CentralityCorrelation]:
     """Return Spearman correlations between centrality metrics."""
     G = await get_cached_graph(client)
-    metrics = compute_centrality_metrics(G)
+    # Use cached metrics — avoids re-running NetworKit C++ (5-15s) per request
+    metrics = await asyncio.to_thread(get_cached_centrality_metrics, G)
     data = compute_centrality_correlations(G, metrics)
     return [CentralityCorrelation(**row) for row in data]
 
@@ -157,5 +165,6 @@ async def get_resilience(
 ) -> ResilienceAnalysis:
     """Return network resilience analysis under targeted node removal."""
     G = await get_cached_graph(client)
-    data = compute_resilience(G)
+    # Offload to thread — PageRank + repeated LCC computation blocks event loop
+    data = await asyncio.to_thread(compute_resilience, G)
     return ResilienceAnalysis(**data)

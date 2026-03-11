@@ -3,8 +3,8 @@
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from "@react-sigma/core";
 import "@react-sigma/core/lib/style.css";
 import Graph from "graphology";
-import forceAtlas2 from "graphology-layout-forceatlas2";
-import { useEffect } from "react";
+import FA2Layout from "graphology-layout-forceatlas2/worker";
+import { useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { GraphControls } from "./graph-controls";
 
@@ -37,11 +37,18 @@ interface NetworkGraphProps {
   onNodePosition?: (position: { x: number; y: number } | null) => void;
 }
 
-// Loads graph data into Sigma instance
+// Loads graph data into Sigma and runs ForceAtlas2 via Web Worker (non-blocking)
 function GraphLoader({ nodes, edges }: Pick<NetworkGraphProps, "nodes" | "edges">) {
   const loadGraph = useLoadGraph();
+  const layoutRef = useRef<InstanceType<typeof FA2Layout> | null>(null);
 
   useEffect(() => {
+    // Stop any running layout before rebuilding
+    if (layoutRef.current) {
+      layoutRef.current.stop();
+      layoutRef.current = null;
+    }
+
     const graph = new Graph();
 
     // Normalize PageRank to size range 3-15
@@ -76,17 +83,30 @@ function GraphLoader({ nodes, edges }: Pick<NetworkGraphProps, "nodes" | "edges"
       }
     });
 
-    // Apply ForceAtlas2 synchronous layout
-    forceAtlas2.assign(graph, {
-      iterations: 100,
+    loadGraph(graph);
+
+    // Run ForceAtlas2 in a Web Worker — avoids blocking the UI thread
+    const layout = new FA2Layout(graph, {
       settings: {
         gravity: 1,
         scalingRatio: 10,
         barnesHutOptimize: true,
       },
     });
+    layoutRef.current = layout;
+    layout.start();
 
-    loadGraph(graph);
+    // Stop after convergence window (~3s for typical board network sizes)
+    const timer = setTimeout(() => {
+      layout.stop();
+      layoutRef.current = null;
+    }, 3000);
+
+    return () => {
+      clearTimeout(timer);
+      layout.stop();
+      layoutRef.current = null;
+    };
   }, [loadGraph, nodes, edges]);
 
   return null;
@@ -102,6 +122,12 @@ function GraphEvents({ nodes, onNodeHover, onNodePosition }: {
   const registerEvents = useRegisterEvents();
   const router = useRouter();
 
+  // O(1) lookup map — avoids O(n²) nodes.find() inside forEachNode callbacks
+  const nodeMap = useMemo(
+    () => new Map(nodes.map((n) => [n.id, n])),
+    [nodes],
+  );
+
   useEffect(() => {
     registerEvents({
       clickNode: (event) => {
@@ -109,7 +135,7 @@ function GraphEvents({ nodes, onNodeHover, onNodePosition }: {
       },
       enterNode: (event) => {
         const graph = sigma.getGraph();
-        const nodeData = nodes.find((n) => n.id === event.node);
+        const nodeData = nodeMap.get(event.node);
 
         if (onNodeHover) onNodeHover(nodeData || null);
 
@@ -160,8 +186,8 @@ function GraphEvents({ nodes, onNodeHover, onNodePosition }: {
           graph.setNodeAttribute(node, "color", COMMUNITY_COLORS[colorIndex]);
           graph.removeNodeAttribute(node, "highlighted");
 
-          // Restore label from the nodes prop
-          const original = nodes.find((n) => n.id === node);
+          // Restore label via O(1) map lookup (was O(n²) with nodes.find inside forEachNode)
+          const original = nodeMap.get(node);
           if (original) {
             graph.setNodeAttribute(node, "label", original.nome);
           }
@@ -174,7 +200,7 @@ function GraphEvents({ nodes, onNodeHover, onNodePosition }: {
         sigma.refresh();
       },
     });
-  }, [registerEvents, sigma, router, nodes, onNodeHover, onNodePosition]);
+  }, [registerEvents, sigma, router, nodeMap, onNodeHover, onNodePosition]);
 
   return null;
 }

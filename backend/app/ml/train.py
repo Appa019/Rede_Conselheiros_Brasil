@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.graph.neo4j_client import Neo4jClient
-from app.graph.metrics import build_networkx_graph
+from app.graph.metrics import build_networkx_graph, build_networkx_graph_for_years
 from app.ml.embeddings import generate_embeddings, save_embeddings
 from app.ml.local_vector_store import LocalVectorStore
 from app.ml.link_prediction import train_link_predictor
@@ -38,16 +38,22 @@ async def run_training_pipeline(
 
     results = {}
 
-    # 1. Build graph (0-10%)
-    progress(2, "Construindo grafo a partir do Neo4j...")
-    logger.info("Building NetworkX graph from Neo4j...")
+    # 1. Build graphs (0-10%): full graph + temporal training graph (≤2023)
+    progress(2, "Construindo grafo completo a partir do Neo4j...")
+    logger.info("Building full NetworkX graph from Neo4j...")
     G = await build_networkx_graph(client)
 
     if G.number_of_nodes() == 0:
         logger.warning("Empty graph, skipping ML pipeline")
         return {"status": "empty_graph"}
 
-    progress(10, f"Grafo construido: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    progress(6, f"Grafo completo: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+    # Temporal training graph: edges present up to 2023 (avoids data leakage)
+    progress(7, "Construindo grafo de treino temporal (≤2023)...")
+    logger.info("Building temporal training graph (MEMBER_OF ≤ 2023)...")
+    G_train = await build_networkx_graph_for_years(client, max_year=2023)
+    progress(10, f"Grafo de treino: {G_train.number_of_nodes()} nodes, {G_train.number_of_edges()} edges")
 
     # 2. Generate embeddings (10-55%) — CPU-bound
     logger.info("Generating Node2Vec embeddings...")
@@ -84,9 +90,14 @@ async def run_training_pipeline(
     progress(60, f"Store local atualizado: {saved} embeddings")
 
     # 4. Train link predictor (60-95%) — CPU-bound
-    logger.info("Training link prediction model...")
+    # Passes G_train for temporal split and embeddings for Hadamard features
+    logger.info("Training link prediction model (temporal split + Node2Vec embeddings)...")
     link_results = await asyncio.to_thread(
-        train_link_predictor, G, LINK_MODEL_PATH,
+        train_link_predictor,
+        G,
+        LINK_MODEL_PATH,
+        G_train=G_train,
+        embeddings=embeddings,
         on_progress=make_sub_progress(60, 95),
     )
     results["link_prediction"] = link_results

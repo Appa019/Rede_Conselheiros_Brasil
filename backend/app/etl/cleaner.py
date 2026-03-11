@@ -49,12 +49,23 @@ def normalize_cargo(cargo: str) -> str:
     return CARGO_MAP.get(upper, upper)
 
 
-def generate_person_id(nome_normalizado: str, data_nascimento: str | None) -> str:
+def generate_person_id(
+    nome_normalizado: str,
+    data_nascimento: str | None,
+    cpf: str | None = None,
+) -> str:
     """Create a deterministic 12-char hex ID for a person.
 
-    Uses SHA-256 of nome_normalizado + data_nascimento (or name only when
-    birth date is missing).
+    When a valid 11-digit CPF is available (data 2023+), uses it as the
+    primary key — making deduplication deterministic regardless of name
+    spelling variations across years. Falls back to SHA-256 of
+    nome_normalizado + data_nascimento when CPF is absent.
     """
+    if cpf:
+        cpf_clean = re.sub(r"\D", "", str(cpf).strip())
+        if len(cpf_clean) == 11:
+            return hashlib.sha256(f"cpf:{cpf_clean}".encode("utf-8")).hexdigest()[:12]
+
     key = nome_normalizado
     if data_nascimento and str(data_nascimento).strip():
         key = f"{nome_normalizado}|{str(data_nascimento).strip()}"
@@ -226,16 +237,18 @@ def clean_administradores(
     df = df.dropna(subset=["cd_cvm"])
     df["cd_cvm"] = df["cd_cvm"].astype(int)
 
-    # Generate person ID
+    # Generate person ID — prefer CPF when available (data 2023+)
     df["data_nascimento_str"] = df.get("data_nascimento", pd.Series(dtype=str)).astype(str)
+    df["cpf_str"] = df["cpf"].astype(str) if "cpf" in df.columns else ""
     df["id"] = df.apply(
         lambda r: generate_person_id(
             r["nome_normalizado"],
             r["data_nascimento_str"] if r["data_nascimento_str"] != "NaT" else None,
+            r["cpf_str"] if r.get("cpf_str") not in ("", "nan", "NaT", "None") else None,
         ),
         axis=1,
     )
-    df = df.drop(columns=["data_nascimento_str"])
+    df = df.drop(columns=["data_nascimento_str", "cpf_str"])
 
     logger.info("Cleaned administradores: %d rows", len(df))
     return df

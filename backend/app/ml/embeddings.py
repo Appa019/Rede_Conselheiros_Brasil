@@ -50,7 +50,8 @@ def generate_embeddings(
     )
 
     progress(40, "Treinando Word2Vec nos random walks...")
-    model = node2vec.fit(window=10, min_count=1, batch_words=4)
+    # seed=42 + workers=1 ensure deterministic output across runs
+    model = node2vec.fit(window=10, min_count=1, batch_words=4, seed=42, workers=1)
 
     progress(85, "Extraindo vetores de embedding...")
     embeddings = {}

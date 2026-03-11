@@ -2,6 +2,7 @@
 
 import logging
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
@@ -41,6 +42,37 @@ def _nk_scores_to_dict(
 
 # In-memory cache for the NetworkX graph (avoids rebuilding per request)
 _graph_cache: dict[str, Any] = {"graph": None, "timestamp": 0, "ttl": 300}
+
+# In-memory cache for centrality metrics (expensive to recompute per request)
+_metrics_cache: dict[str, Any] = {"metrics": None, "timestamp": 0, "ttl": 300}
+
+
+async def build_networkx_graph_for_years(
+    client: Neo4jClient, max_year: int
+) -> nx.Graph:
+    """Build a NetworkX graph from MEMBER_OF edges up to max_year (inclusive).
+
+    Unlike build_networkx_graph() which reads pre-projected CO_MEMBER edges,
+    this queries MEMBER_OF directly so we can filter by year. Used for
+    temporal train/test splitting in link prediction (Fatal 1 fix).
+    """
+    query = """
+    MATCH (p1:Person)-[r1:MEMBER_OF]->(c:Company)<-[r2:MEMBER_OF]-(p2:Person)
+    WHERE p1.id < p2.id
+      AND (r1.ano_referencia IS NULL OR r1.ano_referencia <= $max_year)
+      AND (r2.ano_referencia IS NULL OR r2.ano_referencia <= $max_year)
+    WITH p1, p2, count(DISTINCT c) AS weight
+    RETURN p1.id AS source, p2.id AS target, weight
+    """
+    records = await client.execute_read(query, {"max_year": max_year})
+    G = nx.Graph()
+    for record in records:
+        G.add_edge(record["source"], record["target"], weight=record["weight"])
+    logger.info(
+        "Built temporal graph (≤%d): %d nodes, %d edges",
+        max_year, G.number_of_nodes(), G.number_of_edges(),
+    )
+    return G
 
 
 async def build_networkx_graph(client: Neo4jClient, year: int | None = None) -> nx.Graph:
@@ -160,35 +192,36 @@ def compute_structural_holes(G: nx.Graph) -> dict[str, float]:
 def compute_concentration_metrics(
     G: nx.Graph, metrics: dict[str, dict[str, float]]
 ) -> dict[str, float]:
-    """Compute concentration/inequality metrics."""
+    """Compute concentration/inequality metrics.
+
+    Both Gini and HHI use raw degree (number of co-member connections)
+    so they measure the same underlying quantity and are comparable.
+    The real interlocking_index (Mizruchi 1996) requires the bipartite
+    company-person graph and is computed via Cypher in the router.
+    """
     logger.info("Computing concentration metrics...")
 
-    # Gini coefficient of degree centrality
-    degrees = sorted(metrics["degree_centrality"].values())
-    n = len(degrees)
-    if n > 0:
-        numerator = 2 * sum(i * d for i, d in enumerate(degrees, 1))
-        denominator = n * sum(degrees)
-        gini = (numerator / denominator - (n + 1) / n) if denominator > 0 else 0
-    else:
-        gini = 0
+    # Gini and HHI: use raw degree (same basis for both, avoids FATAL 3)
+    raw_degrees = sorted([d for _, d in G.degree() if d > 0])
+    n = len(raw_degrees)
+    total = sum(raw_degrees)
 
-    # HHI of seats (concentration per company)
-    degree_values = list(dict(G.degree()).values())
-    total_seats = sum(degree_values)
-    if total_seats > 0:
-        shares = [d / total_seats for d in degree_values]
+    if n > 0 and total > 0:
+        numerator = 2 * sum(i * d for i, d in enumerate(raw_degrees, 1))
+        gini = numerator / (n * total) - (n + 1) / n
+        shares = [d / total for d in raw_degrees]
         hhi = sum(s**2 for s in shares)
     else:
+        gini = 0
         hhi = 0
 
-    # Interlocking index approximated by graph density
     density = nx.density(G) if G.number_of_nodes() > 1 else 0
 
     return {
         "gini_centrality": round(gini, 4),
         "hhi_seats": round(hhi, 6),
-        "interlocking_index": round(density, 4),
+        # Real interlocking_index is computed via Cypher in the /concentration router
+        "interlocking_index": None,
         "network_density": round(density, 4),
     }
 
@@ -206,18 +239,59 @@ def invalidate_graph_cache() -> None:
     """Force cache invalidation (call after ETL/metrics recomputation)."""
     _graph_cache["graph"] = None
     _graph_cache["timestamp"] = 0
+    _metrics_cache["metrics"] = None
+    _metrics_cache["timestamp"] = 0
 
 
-def _compute_random_graph_cl(n: int, m: int, seed: int) -> tuple[float, float]:
-    """Generate a random graph and return (transitivity, avg_shortest_path)."""
+def get_cached_centrality_metrics(G: nx.Graph) -> dict[str, dict[str, float]]:
+    """Return cached centrality metrics, recomputing if TTL expired or cache is empty.
+
+    Avoids running NetworKit C++ computation on every /centrality-correlation request.
+    TTL matches the graph cache (5 min) to stay consistent.
+    """
+    now = time.time()
+    if (
+        _metrics_cache["metrics"] is None
+        or (now - _metrics_cache["timestamp"]) > _metrics_cache["ttl"]
+    ):
+        _metrics_cache["metrics"] = compute_centrality_metrics(G)
+        _metrics_cache["timestamp"] = now
+    return _metrics_cache["metrics"]  # type: ignore[return-value]
+
+
+def _sampled_avg_path(H: nx.Graph, sample_size: int = 200, seed: int = 42) -> float:
+    """Compute approximate average shortest path length via sampled BFS.
+
+    Uses sample_size random source nodes instead of all nodes, making it
+    feasible for large graphs (n > 1000) where full O(n*(n+m)) is too slow.
+    """
+    nodes = list(H.nodes())
+    rng = np.random.default_rng(seed)
+    sample = rng.choice(nodes, size=min(sample_size, len(nodes)), replace=False)
+    path_lengths: list[float] = []
+    for src in sample:
+        lengths = nx.single_source_shortest_path_length(H, src)
+        path_lengths.extend(lengths.values())
+    return float(np.mean(path_lengths)) if path_lengths else float("inf")
+
+
+def _compute_random_graph_cl(
+    n: int, m: int, seed: int, sample_size: int = 200
+) -> tuple[float, float]:
+    """Generate a random GNM graph and return (transitivity, avg_shortest_path).
+
+    Uses sampled BFS when n > sample_size to keep runtime bounded.
+    """
     R = nx.gnm_random_graph(n, m, seed=seed)
     c = nx.transitivity(R)
-    # Use largest connected component for path length
     if R.number_of_nodes() > 1:
         largest_cc = max(nx.connected_components(R), key=len)
         Rh = R.subgraph(largest_cc)
         if Rh.number_of_nodes() > 1:
-            l_val = nx.average_shortest_path_length(Rh)
+            if Rh.number_of_nodes() > sample_size:
+                l_val = _sampled_avg_path(Rh, sample_size=sample_size, seed=seed)
+            else:
+                l_val = nx.average_shortest_path_length(Rh)
         else:
             l_val = float("inf")
     else:
@@ -226,15 +300,19 @@ def _compute_random_graph_cl(n: int, m: int, seed: int) -> tuple[float, float]:
 
 
 def _compute_small_world_sigma(
-    H: nx.Graph, c_real: float, l_real: float, n_random: int = 5
+    H: nx.Graph, c_real: float, l_real: float, n_random: int = 50
 ) -> dict[str, Any]:
     """Compute small-world sigma via ensemble of random graph comparisons.
+
+    Uses n_random=50 reference graphs (up from 5) so that 2.5/97.5 percentile
+    CIs are meaningful (Humphries & Gurney 2008). Applies dual criterion:
+    sigma > 1.5 AND L_real/L_random < 1.3 (necessary+sufficient conditions).
 
     Args:
         H: Largest connected component subgraph.
         c_real: Real transitivity of H.
         l_real: Real average shortest path length of H.
-        n_random: Number of random reference graphs to generate.
+        n_random: Number of random reference graphs (default 50 for valid CIs).
 
     Returns:
         Dict with small_world_sigma, CI bounds, and is_small_world flag.
@@ -249,7 +327,8 @@ def _compute_small_world_sigma(
     }
 
     try:
-        with ThreadPoolExecutor(max_workers=n_random) as executor:
+        max_workers = min(n_random, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(_compute_random_graph_cl, n, m, seed=42 + i)
                 for i in range(n_random)
@@ -259,8 +338,8 @@ def _compute_small_world_sigma(
         c_randoms = [r[0] for r in random_results]
         l_randoms = [r[1] for r in random_results if r[1] != float("inf")]
 
-        c_random = np.mean(c_randoms) if c_randoms else 0
-        l_random = np.mean(l_randoms) if l_randoms else float("inf")
+        c_random = float(np.mean(c_randoms)) if c_randoms else 0
+        l_random = float(np.mean(l_randoms)) if l_randoms else float("inf")
 
         if c_random <= 0 or l_random <= 0 or l_real <= 0 or l_random == float("inf"):
             return _null
@@ -271,12 +350,16 @@ def _compute_small_world_sigma(
             if c_r > 0 and l_r > 0 and l_r != float("inf")
         ]
         sigma = (c_real / c_random) / (l_real / l_random)
+        l_ratio = l_real / l_random
+
+        # Dual criterion (Humphries & Gurney 2008): sigma > 1.5 AND L_real/L_random < 1.3
+        is_small_world = sigma > 1.5 and l_ratio < 1.3
 
         return {
             "small_world_sigma": round(sigma, 4),
-            "is_small_world": sigma > 1,
-            "small_world_sigma_ci_low": round(float(np.percentile(sigmas, 2.5)), 4) if len(sigmas) >= 3 else None,
-            "small_world_sigma_ci_high": round(float(np.percentile(sigmas, 97.5)), 4) if len(sigmas) >= 3 else None,
+            "is_small_world": is_small_world,
+            "small_world_sigma_ci_low": round(float(np.percentile(sigmas, 2.5)), 4) if len(sigmas) >= 10 else None,
+            "small_world_sigma_ci_high": round(float(np.percentile(sigmas, 97.5)), 4) if len(sigmas) >= 10 else None,
         }
     except Exception as exc:
         logger.warning("Small-world computation failed: %s", exc)
@@ -344,9 +427,15 @@ def compute_advanced_metrics(G: nx.Graph) -> dict[str, Any]:
         H = G.subgraph(largest_cc).copy()
 
         if H.number_of_nodes() > 1:
-            avg_path = round(nx.average_shortest_path_length(H), 4)
+            # Use sampled BFS for large graphs — O(sample × (n+m)) instead of O(n×(n+m))
+            if H.number_of_nodes() > 1000:
+                avg_path = round(_sampled_avg_path(H, sample_size=200, seed=42), 4)
+                # Diameter: exact computation is O(n*(n+m)); skip for large graphs
+                result["diameter"] = None
+            else:
+                avg_path = round(nx.average_shortest_path_length(H), 4)
+                result["diameter"] = nx.diameter(H)
             result["avg_shortest_path"] = avg_path
-            result["diameter"] = nx.diameter(H)
             result.update(_compute_small_world_sigma(H, nx.transitivity(H), avg_path))
         else:
             result.update(_path_null)
@@ -596,7 +685,6 @@ def compute_resilience(G: nx.Graph) -> dict[str, Any]:
 
     percentages = [0.01, 0.02, 0.05, 0.10]
     points = []
-    is_fragile = False
 
     H = G.copy()
     removed_so_far = 0
@@ -617,9 +705,6 @@ def compute_resilience(G: nx.Graph) -> dict[str, Any]:
             "remaining_largest_component": round(largest, 4),
             "nodes_removed": n_remove,
         })
-
-        if pct == 0.05 and largest < baseline * 0.5:
-            is_fragile = True
 
     # Random removal baseline (average of 3 runs)
     n_random_runs = 3
@@ -643,6 +728,9 @@ def compute_resilience(G: nx.Graph) -> dict[str, Any]:
         drop_random = baseline - random_5["remaining_largest_component"]
         if drop_random > 0:
             vulnerability_ratio = round(drop_targeted / drop_random, 4)
+
+    # is_fragile: targeted removal causes >3× more damage than random (Albert et al. 2000)
+    is_fragile = vulnerability_ratio is not None and vulnerability_ratio > 3.0
 
     return {
         "points": points,
